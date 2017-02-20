@@ -1,0 +1,3 @@
+*** TODO manage modules color by create a manager .
+    like activitymanager ,recoreder view name (class name ) and push this view to stact(this manager)
+    

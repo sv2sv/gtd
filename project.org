@@ -1,0 +1,6 @@
+*** TODO [#A] android PPnews
+
+*** WAIT [#B] linux kernel
+*** WAIT [#C] machine study(python)
+*** WAIT [#B] mac pc 
+
