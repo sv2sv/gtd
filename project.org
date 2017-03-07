@@ -1,6 +1,7 @@
-*** TODO [#A] android PPnews
+*** DONE [#A] android PPnews
+    CLOSED: [2017-03-07 Tue 16:59]
 
 *** WAIT [#B] linux kernel
 *** WAIT [#C] machine study(python)
 *** WAIT [#B] mac pc 
-
+*** TODO  change android statusbar style

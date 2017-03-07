@@ -1,0 +1,190 @@
+*** statusbar 
+    SystemServer.java:
+#+BEGIN_SRC 
+   private void run() {
+         startOtherServices();
+   }
+
+private void startOtherServices() {
+ boolean disableSystemUI = SystemProperties.getBoolean("config.disable_systemui", false);
+if (!disableSystemUI) {
+                try {
+                    Slog.i(TAG, "Status Bar");
+                    statusBar = new StatusBarManagerService(context, wm);
+                    ServiceManager.addService(Context.STATUS_BAR_SERVICE, statusBar);
+                } catch (Throwable e) {
+                    reportWtf("starting StatusBarManagerService", e);
+                }
+            }
+mActivityManagerService.systemReady(new Runnable() {
+            @Override
+            public void run() {
+               try {
+                    startSystemUi(context);
+                   } catch (Throwable e) {
+                    reportWtf("starting System UI", e);
+                   }
+               }
+}
+
+static final void startSystemUi(Context context) {
+        Intent intent = new Intent();
+        intent.setComponent(new ComponentName("com.android.systemui",
+                    "com.android.systemui.SystemUIService"));
+        //Slog.d(TAG, "Starting service: " + intent);
+        context.startServiceAsUser(intent, UserHandle.OWNER);
+    }
+
+#+END_SRC
+
+
+	SystemUIService.java:
+#+BEGIN_SRC 
+@Override
+    public void onCreate() {
+        super.onCreate();
+        ((SystemUIApplication) getApplication()).startServicesIfNeeded();
+    }
+#+END_SRC
+
+
+	SystemUIApplication.java
+#+BEGIN_SRC 
+	private final Class<?>[] SERVICES = new Class[] {
+            com.android.systemui.keyguard.KeyguardViewMediator.class,
+            com.android.systemui.recent.Recents.class,
+            com.android.systemui.volume.VolumeUI.class,
+            com.android.systemui.statusbar.SystemBars.class,
+            com.android.systemui.usb.StorageNotification.class,
+            com.android.systemui.power.PowerUI.class,
+            com.android.systemui.media.RingtonePlayer.class
+    };
+
+	 public void startServicesIfNeeded() {
+        if (mServicesStarted) {
+            return;
+        }
+
+        if (!mBootCompleted) {
+            // check to see if maybe it was already completed long before we began
+            // see ActivityManagerService.finishBooting()
+            if ("1".equals(SystemProperties.get("sys.boot_completed"))) {
+                mBootCompleted = true;
+                if (DEBUG) Log.v(TAG, "BOOT_COMPLETED was already sent");
+            }
+        }
+
+        Log.v(TAG, "Starting SystemUI services.");
+        final int N = SERVICES.length;
+        for (int i=0; i<N; i++) {
+            Class<?> cl = SERVICES[i];
+            if (DEBUG) Log.d(TAG, "loading: " + cl);
+            try {
+                mServices[i] = (SystemUI)cl.newInstance();
+            } catch (IllegalAccessException ex) {
+                throw new RuntimeException(ex);
+            } catch (InstantiationException ex) {
+                throw new RuntimeException(ex);
+            }
+            mServices[i].mContext = this;
+            mServices[i].mComponents = mComponents;
+            if (DEBUG) Log.d(TAG, "running: " + mServices[i]);
+            mServices[i].start();
+
+            if (mBootCompleted) {
+                mServices[i].onBootCompleted();
+            }
+        }
+        mServicesStarted = true;
+    }
+#+END_SRC
+		SystemBars.java:
+#+BEGIN_SRC 
+
+	SystemBars extends SystemUI implements ServiceMonitor.Callbacks
+
+	   public interface ServiceMonitor.Callbacks {
+        /** The service does not exist or failed to bind */
+        void onNoService();
+        /** The service is about to start, this is a chance to perform cleanup and
+         * delay the start if necessary */
+        long onServiceStartAttempt();
+    }
+
+public void start() {
+        if (DEBUG) Log.d(TAG, "start");
+        mServiceMonitor = new ServiceMonitor(TAG, DEBUG,
+                mContext, Settings.Secure.BAR_SERVICE_COMPONENT, this);
+        mServiceMonitor.start();  // will call onNoService if no remote service is found
+    }
+
+
+#+END_SRC
+ServiceMonitor的start方法会注册一个ContentObserver,ContentObserver中handle发送消息
+	MSG_STOP_SERVICE
+	MSG_START_SERVICE
+
+在handle中处理：
+	 case MSG_START_SERVICE:
+                    startService();
+                    break;
+                case MSG_CONTINUE_START_SERVICE:
+                    continueStartService();
+                    break;
+                case MSG_STOP_SERVICE:
+                    stopService();
+                    break;
+                case MSG_PACKAGE_INTENT:
+                    packageIntent((Intent)msg.obj);
+                    break;
+                case MSG_CHECK_BOUND:
+                    checkBound();
+                    break;
+                case MSG_SERVICE_DISCONNECTED:
+                    serviceDisconnected((ComponentName)msg.obj);
+                    break;
+
+startService()中会回掉ServiceMonitor.Callbacks中的两个方法,
+
+SystemBars.java中的
+ public void onNoService() {
+        if (DEBUG) Log.d(TAG, "onNoService");
+        createStatusBarFromConfig();  // fallback to using an in-process implementation
+    } 
+
+private void createStatusBarFromConfig() {
+        if (DEBUG) Log.d(TAG, "createStatusBarFromConfig");
+        final String clsName = mContext.getString(R.string.config_statusBarComponent);
+        if (clsName == null || clsName.length() == 0) {
+            throw andLog("No status bar component configured", null);
+        }
+        Class<?> cls = null;
+        try {
+            cls = mContext.getClassLoader().loadClass(clsName);
+        } catch (Throwable t) {
+            throw andLog("Error loading status bar component: " + clsName, t);
+        }
+        try {
+            mStatusBar = (BaseStatusBar) cls.newInstance();
+        } catch (Throwable t) {
+            throw andLog("Error creating status bar component: " + clsName, t);
+        }
+        mStatusBar.mContext = mContext;
+        mStatusBar.mComponents = mComponents;
+        mStatusBar.start();
+        if (DEBUG) Log.d(TAG, "started " + mStatusBar.getClass().getSimpleName());
+    }
+
+代码中通过获取R.string.config_statusBarComponent字符串获取类名，从values/config.xml中找到：
+    <string name="config_statusBarComponent" translatable="false">com.android.systemui.statusbar.phone.PhoneStatusBar</string>
+
+锁定PhoneStatusBar.java
+public class PhoneStatusBar extends BaseStatusBar
+public abstract class BaseStatusBar extends SystemUI
+
+	BaseStatusBar 的start()方法中有抽象方法createAndAddWindows();
+	PhoneStatusBar中重写
+	@Override
+    public void createAndAddWindows() {
+        addStatusBarWindow();
+    }
