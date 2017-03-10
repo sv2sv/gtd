@@ -1,0 +1,166 @@
+*** SystemServer 
+	main() -> run() ->  startOtherServices()
+		boolean disableSystemUI = SystemProperties.getBoolean("config.disable_systemui", false);
+		if (!disableSystemUI) {
+                    statusBar = new StatusBarManagerService(context, wm);
+                    ServiceManager.addService(Context.STATUS_BAR_SERVICE, statusBar);
+               
+            }
+
+	-> mActivityManagerService.systemReady()
+	 public void run() {
+			 startSystemUi(context);
+		}
+	-> startSystemUi()
+		static final void startSystemUi(Context context) {
+        Intent intent = new Intent();
+        intent.setComponent(new ComponentName("com.android.systemui",
+                    "com.android.systemui.SystemUIService"));
+        //Slog.d(TAG, "Starting service: " + intent);
+        context.startServiceAsUser(intent, UserHandle.OWNER);
+    }
+*** SystemUIService
+	oncreate() -> ((SystemUIApplication) getApplication()).startServicesIfNeeded()
+
+*** SystemUIApplication
+	private final Class<?>[] SERVICES = new Class[] {
+            com.android.systemui.keyguard.KeyguardViewMediator.class,
+            com.android.systemui.recent.Recents.class,
+            com.android.systemui.volume.VolumeUI.class,
+            com.android.systemui.statusbar.SystemBars.class,       //StatusBar
+            com.android.systemui.usb.StorageNotification.class,
+            com.android.systemui.power.PowerUI.class,
+            com.android.systemui.media.RingtonePlayer.class
+    };
+
+	private final SystemUI[] mServices = new SystemUI[SERVICES.length];
+
+	oncreate() 接收Intent.ACTION_BOOT_COMPLETED广播并处理
+	public void onReceive(Context context, Intent intent) {
+	 if (mBootCompleted) return;
+                if (DEBUG) Log.v(TAG, "BOOT_COMPLETED received");
+                unregisterReceiver(this);
+                mBootCompleted = true;
+                if (mServicesStarted) {
+                    final int N = mServices.length;
+                    for (int i = 0; i < N; i++) {
+                        mServices[i].onBootCompleted();
+                    }
+                }
+	｝
+	startServicesIfNeeded() 
+	final int N = SERVICES.length;
+        for (int i=0; i<N; i++) {
+            Class<?> cl = SERVICES[i];
+  
+            try {
+                mServices[i] = (SystemUI)cl.newInstance();
+            } catch (IllegalAccessException ex) {
+                throw new RuntimeException(ex);
+            } catch (InstantiationException ex) {
+                throw new RuntimeException(ex);
+            }
+            mServices[i].mContext = this;
+            mServices[i].mComponents = mComponents;
+            if (DEBUG) Log.d(TAG, "running: " + mServices[i]);
+            mServices[i].start();
+
+            if (mBootCompleted) {
+                mServices[i].onBootCompleted();
+            }
+        }
+        mServicesStarted = true;
+
+　　-> StatusBars.start()
+
+*** StatusBars
+	SystemBars extends SystemUI implements ServiceMonitor.Callbacks
+
+	private ServiceMonitor mServiceMonitor;
+
+    // in-process fallback implementation, per the product config
+    private BaseStatusBar mStatusBar;
+	 public void start() {
+        mServiceMonitor = new ServiceMonitor(TAG, DEBUG,
+                mContext, Settings.Secure.BAR_SERVICE_COMPONENT, this);    // this (ServiceMonitor.Callbacks)
+        mServiceMonitor.start();  // will call onNoService if no remote service is found
+    }
+
+**** ServiceMonitor.Callbacks(SystemBars 实现)
+	 public void onNoService() {
+        if (DEBUG) Log.d(TAG, "onNoService");
+        createStatusBarFromConfig();  // fallback to using an in-process implementation 读取String获取类名，实例该类调用ｓｔａｒｔ（），该Ｓｔｒｉｎｇ为：com.android.systemui.statusbar.phone.PhoneStatusBar
+    }
+
+    @Override
+    public long onServiceStartAttempt() {
+        if (DEBUG) Log.d(TAG, "onServiceStartAttempt mStatusBar="+mStatusBar);
+        if (mStatusBar != null) {
+            // tear down the in-process version, we'll recreate it again if needed
+            mStatusBar.destroy();
+            mStatusBar = null;
+            return WAIT_FOR_BARS_TO_DIE;
+        }
+        return 0;
+    }
+
+**** ServiceMonitor
+	start()
+	  cr.registerContentObserver(Settings.Secure.getUriFor(mSettingKey),
+                false /*notifyForDescendents*/, mSettingObserver, UserHandle.USER_ALL);
+
+        // listen for package/component changes
+        IntentFilter filter = new IntentFilter();
+        filter.addAction(Intent.ACTION_PACKAGE_ADDED);
+        filter.addAction(Intent.ACTION_PACKAGE_CHANGED);
+        filter.addDataScheme("package");
+        mContext.registerReceiver(mBroadcastReceiver, filter);
+
+        mHandler.sendEmptyMessage(MSG_START_SERVICE);
+	
+	private final BroadcastReceiver mBroadcastReceiver = new BroadcastReceiver() {
+        public void onReceive(Context context, Intent intent) {
+            String pkg = intent.getData().getSchemeSpecificPart();
+            if (mServiceName != null && mServiceName.getPackageName().equals(pkg)) {
+                mHandler.sendMessage(mHandler.obtainMessage(MSG_PACKAGE_INTENT, intent));
+            }
+        }
+    };
+
+	private final Handler mHandler = new Handler() {
+        public void handleMessage(Message msg) {
+            switch(msg.what) {
+                case MSG_START_SERVICE:
+                    startService();			// getComponentNameFromSetting() == null ? mBound = false;mCallbacks.onNoService() : mHandler.sendEmptyMessageDelayed(MSG_CONTINUE_START_SERVICE, delay);
+                    break;
+                case MSG_CONTINUE_START_SERVICE:
+                    continueStartService();	 // 调用mBound =　bindService(),	if (!mBound) mCallbacks.onNoService();
+                    break;
+                case MSG_STOP_SERVICE:
+                    stopService();
+                    break;
+                case MSG_PACKAGE_INTENT:
+                    packageIntent((Intent)msg.obj);
+                    break;
+                case MSG_CHECK_BOUND:
+                    checkBound();
+                    break;
+                case MSG_SERVICE_DISCONNECTED:
+                    serviceDisconnected((ComponentName)msg.obj);
+                    break;
+            }
+        }
+    };
+
+*** PhoneSatusBar extends BaseStatusBar
+	super.start(); // calls createAndAddWindows()
+	protected abstract void createAndAddWindows();
+	PhoneSatusBar.createAndAddWindows() {
+        addStatusBarWindow();
+    }
+
+	 addStatusBarWindow() ->  makeStatusBarView() 
+		
+	makeStatusBarView() 中各种findViewbyId()
+	
+	
