@@ -1,0 +1,200 @@
+#include <pthread.h>
+pthread_getspecific(pthread_key_t) 获取线程局部存储
+pthread_getspecific(pthread_key_t)设置线程局部存储
+
+*** BpBinder
+    1.BpBinder::transact()  -> IPCThreadState::self()->transact()
+    #+BEGIN_SRC 
+    status_t IPCThreadState::transact(int32_t handle,
+                                  uint32_t code, const Parcel& data,
+                                  Parcel* reply, uint32_t flags)
+{
+    status_t err = data.errorCheck();
+
+    flags |= TF_ACCEPT_FDS;
+
+    
+    if (err == NO_ERROR) {
+        LOG_ONEWAY(">>>> SEND from pid %d uid %d %s", getpid(), getuid(),
+            (flags & TF_ONE_WAY) == 0 ? "READ REPLY" : "ONE WAY");
+        err = writeTransactionData(BC_TRANSACTION, flags, handle, code, data, NULL);
+    }
+    
+    if (err != NO_ERROR) {
+        if (reply) reply->setError(err);
+#ifdef _MTK_ENG_BUILD_
+		ALOGD("transact return err=%d before ioctl\n", (int32_t)err);
+#endif
+        return (mLastError = err);
+    }
+    
+    if ((flags & TF_ONE_WAY) == 0) {
+        #if 0
+        if (code == 4) { // relayout
+            ALOGI(">>>>>> CALLING transaction 4");
+        } else {
+            ALOGI(">>>>>> CALLING transaction %d", code);
+        }
+        #endif
+        if (reply) {
+            err = waitForResponse(reply);
+        } else {
+            Parcel fakeReply;
+            err = waitForResponse(&fakeReply);
+        }
+        #if 0
+        if (code == 4) { // relayout
+            ALOGI("<<<<<< RETURNING transaction 4");
+        } else {
+            ALOGI("<<<<<< RETURNING transaction %d", code);
+        }
+        #endif
+        
+    } else {
+        err = waitForResponse(NULL, NULL);
+    }
+
+#ifdef _MTK_ENG_BUILD_
+    if (err != NO_ERROR) {
+        ALOGD("transact return err=%d\n", (int32_t)err);
+    }
+#endif
+    return err;
+}
+
+// 写入mOut
+status_t IPCThreadState::writeTransactionData(int32_t cmd, uint32_t binderFlags,
+    int32_t handle, uint32_t code, const Parcel& data, status_t* statusBuffer)
+{
+    binder_transaction_data tr;
+
+    tr.target.ptr = 0; /* Don't pass uninitialized stack data to a remote process */
+    tr.target.handle = handle;
+    tr.code = code;
+    tr.flags = binderFlags;
+    tr.cookie = 0;
+    tr.sender_pid = 0;
+    tr.sender_euid = 0;
+    
+    const status_t err = data.errorCheck();
+    if (err == NO_ERROR) {
+        tr.data_size = data.ipcDataSize();
+        tr.data.ptr.buffer = data.ipcData();
+        tr.offsets_size = data.ipcObjectsCount()*sizeof(binder_size_t);
+        tr.data.ptr.offsets = data.ipcObjects();
+    } else if (statusBuffer) {
+        tr.flags |= TF_STATUS_CODE;
+        *statusBuffer = err;
+        tr.data_size = sizeof(status_t);
+        tr.data.ptr.buffer = reinterpret_cast<uintptr_t>(statusBuffer);
+        tr.offsets_size = 0;
+        tr.data.ptr.offsets = 0;
+    } else {
+        return (mLastError = err);
+    }
+    
+    mOut.writeInt32(cmd);
+    mOut.write(&tr, sizeof(tr));
+    
+    return NO_ERROR;
+}
+
+
+status_t IPCThreadState::waitForResponse(Parcel *reply, status_t *acquireResult)
+{
+    int32_t cmd;
+    int32_t err;
+#ifdef _MTK_ENG_BUILD_
+	cmd = 0;// initialze it for build error [-Werror=maybe-uninitialized]
+#endif
+
+    while (1) {
+        if ((err=talkWithDriver()) < NO_ERROR) break;
+        err = mIn.errorCheck();
+        if (err < NO_ERROR) break;
+        if (mIn.dataAvail() == 0) continue;
+        
+        cmd = mIn.readInt32();
+        
+        IF_LOG_COMMANDS() {
+            alog << "Processing waitForResponse Command: "
+                << getReturnString(cmd) << endl;
+        }
+
+        switch (cmd) {
+        case BR_TRANSACTION_COMPLETE:
+            if (!reply && !acquireResult) goto finish;
+            break;
+        
+        case BR_DEAD_REPLY:
+            err = DEAD_OBJECT;
+            goto finish;
+
+        case BR_FAILED_REPLY:
+            err = FAILED_TRANSACTION;
+            goto finish;
+        
+        case BR_ACQUIRE_RESULT:
+            {
+                ALOG_ASSERT(acquireResult != NULL, "Unexpected brACQUIRE_RESULT");
+                const int32_t result = mIn.readInt32();
+                if (!acquireResult) continue;
+                *acquireResult = result ? NO_ERROR : INVALID_OPERATION;
+            }
+            goto finish;
+        
+        case BR_REPLY:
+            {
+                binder_transaction_data tr;
+                err = mIn.read(&tr, sizeof(tr));
+                ALOG_ASSERT(err == NO_ERROR, "Not enough command data for brREPLY");
+                if (err != NO_ERROR) goto finish;
+
+                if (reply) {
+                    if ((tr.flags & TF_STATUS_CODE) == 0) {
+                        reply->ipcSetDataReference(
+                            reinterpret_cast<const uint8_t*>(tr.data.ptr.buffer),
+                            tr.data_size,
+                            reinterpret_cast<const binder_size_t*>(tr.data.ptr.offsets),
+                            tr.offsets_size/sizeof(binder_size_t),
+                            freeBuffer, this);
+                    } else {
+                        err = *reinterpret_cast<const status_t*>(tr.data.ptr.buffer);
+                        freeBuffer(NULL,
+                            reinterpret_cast<const uint8_t*>(tr.data.ptr.buffer),
+                            tr.data_size,
+                            reinterpret_cast<const binder_size_t*>(tr.data.ptr.offsets),
+                            tr.offsets_size/sizeof(binder_size_t), this);
+                    }
+                } else {
+                    freeBuffer(NULL,
+                        reinterpret_cast<const uint8_t*>(tr.data.ptr.buffer),
+                        tr.data_size,
+                        reinterpret_cast<const binder_size_t*>(tr.data.ptr.offsets),
+                        tr.offsets_size/sizeof(binder_size_t), this);
+                    continue;
+                }
+            }
+            goto finish;
+
+        default:
+            err = executeCommand(cmd);
+            if (err != NO_ERROR) goto finish;
+            break;
+        }
+    }
+
+finish:
+    if (err != NO_ERROR) {
+        if (acquireResult) *acquireResult = err;
+        if (reply) reply->setError(err);
+        mLastError = err;
+#ifdef _MTK_ENG_BUILD_
+		ALOGD("WFR got cmd %d err=%d\n", cmd, err);
+#endif
+    }
+    
+    return err;
+}
+
+    #+END_SRC
